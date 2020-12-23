@@ -21,19 +21,28 @@
 **/
 #include "fio.h"
 #include <unistd.h>
-
-namespace sys {
+#include <fcntl.h>
 
       fio::fio() noexcept:
       m_desc(undef),
-      m_mode(0)
+      m_mode(0),
+      m_own(false),
+      m_seekable(false)
 {
 }
 
-      fio::fio(int dsc, int mode, int permissions) noexcept:
-      m_desc(dsc),
-      m_mode(mode)
+      fio::fio(int desc, int mode, int permissions) noexcept:
+      m_desc(desc),
+      m_mode(mode & 65535),
+      m_own(mode & M_ACQUIRE),
+      m_seekable(false)
 {
+      if(desc > undef) {
+          if(mode & O_NONBLOCK) {
+              set_blocking(false);
+          }
+          m_seekable = seek(SEEK_CUR, 0) >= 0;
+      }
 }
 
       fio::fio(const char* name, int mode, int permissions) noexcept:
@@ -64,8 +73,10 @@ void  fio::assign(const fio& copy) noexcept
       if(this != std::addressof(copy)) {
           close();
           if(copy.m_desc > undef) {
-              m_desc = ::dup(copy.m_desc);
-              m_mode = copy.m_mode;
+              m_desc     = ::dup(copy.m_desc);
+              m_mode     = copy.m_mode;
+              m_own      = true;
+              m_seekable = copy.m_seekable;
           } else
               close(true);
       }
@@ -76,8 +87,10 @@ void  fio::assign(fio&& copy) noexcept
       if(this != std::addressof(copy)) {
           close();
           if(copy.m_desc > undef) {
-              m_desc = copy.m_desc;
-              m_mode = copy.m_mode;
+              m_desc     = copy.m_desc;
+              m_mode     = copy.m_mode;
+              m_own      = copy.m_own;
+              m_seekable = copy.m_seekable;
               copy.release();
           } else
               close(true);
@@ -90,7 +103,12 @@ bool  fio::open(const char* name, int mode, int permissions) noexcept
       if(name && name[0]) {
           m_desc = ::open(name, mode, permissions);
           if(m_desc > undef) {
-              m_mode = mode;
+              m_mode = mode & 65535;
+              m_own = true;
+              m_seekable = seek(SEEK_CUR, 0) >= 0;
+              if(mode & O_NONBLOCK) {
+                  set_blocking(false);
+              }
               return true;
           } else
               return false;
@@ -98,21 +116,31 @@ bool  fio::open(const char* name, int mode, int permissions) noexcept
           return false;
 }
 
-bool  fio::copy(int dsc, int mode) noexcept
+bool  fio::copy(int desc, int mode) noexcept
 {
       reset();
-      m_desc = dup(dsc);
-      m_mode = mode;
+      m_desc     = dup(desc);
+      m_mode     = mode & 65535;
+      m_own      = true;
+      m_seekable = seek(SEEK_CUR, 0) >= 0;
+      if(mode & O_NONBLOCK) {
+          set_blocking(false);
+      }
       return m_desc != undef;
 }
 
-bool  fio::move(int& dsc, int mode) noexcept
+bool  fio::move(int& desc, int mode) noexcept
 {
       reset();
-      m_desc = dsc;
-      m_mode = mode;
+      m_desc     = desc;
+      m_mode     = mode & 65535;
+      m_own      = true;
+      m_seekable = seek(SEEK_CUR, 0) >= 0;
       if(m_desc > undef) {
-          dsc = undef;
+          if(mode & O_NONBLOCK) {
+              set_blocking(false);
+          }
+          desc = undef;
           return true;
       }
       return false;
@@ -163,9 +191,9 @@ std::int32_t fio::put_byte(unsigned char value) noexcept
       return write(1, reinterpret_cast<char*>(std::addressof(value)));
 }
 
-std::int32_t fio::write(std::size_t, const char*) noexcept
+std::int32_t fio::write(std::size_t size, const char* data) noexcept
 {
-      return 0;
+      return ::write(m_desc, data, size);
 }
 
 std::int32_t fio::get_size() noexcept
@@ -185,19 +213,49 @@ std::int32_t fio::get_size() noexcept
       return 0;
 }
 
+bool  fio::set_blocking(bool value) noexcept
+{
+      if(int l_get_flags = fcntl(m_desc, F_GETFL, 0); l_get_flags >= 0) {
+          int l_set_flags = l_get_flags;
+          if(value == true) {
+              l_set_flags &= ~O_NONBLOCK;
+          } else
+          if(value == false) {
+              l_set_flags |=  O_NONBLOCK;
+          }
+          if(l_set_flags != l_get_flags) {
+              if(int l_fnctl = fcntl(m_desc, F_SETFL, l_set_flags); l_fnctl >= 0) {
+                  return true;
+              }
+          } else
+              return true;
+      }
+      return false;
+}
+
+bool  fio::set_nonblocking() noexcept
+{
+      return set_blocking(false);
+}
+
+int   fio::get_fd() const noexcept
+{
+      return m_desc;
+}
+
 bool  fio::is_seekable() const noexcept
 {
-      return true;
+      return m_seekable;
 }
 
 bool  fio::is_readable() const noexcept
 {
-      return m_mode & 1;
+      return true;
 }
 
 bool  fio::is_writable() const noexcept
 {
-      return m_mode & 2;
+      return m_mode & (O_WRONLY | O_RDWR);
 }
 
 void  fio::reset() noexcept
@@ -217,10 +275,14 @@ int   fio::release() noexcept
 void  fio::close(bool reset) noexcept
 {
       if(m_desc > undef) {
-          ::close(m_desc);
+          if(m_own) {
+              ::close(m_desc);
+          }
+          m_desc = undef;
+          m_own  = false;
           if(reset) {
-              m_desc = undef;
-              m_mode = 0;
+              m_mode     = 0;
+              m_seekable = false;
           }
       }
 }
@@ -251,5 +313,3 @@ fio&  fio::operator=(fio&& rhs) noexcept
       assign(std::move(rhs));
       return *this;
 }
-
-/*namespace sys*/ }

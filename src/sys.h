@@ -26,15 +26,20 @@
 #include <memory/resource.h>
 #include <memory/fragment.h>
 
-namespace sys {
-
-class ios;
 class sio;
 class fio;
 class bio;
+
+namespace sys {
+
+class ios;
 
 template<typename Xt, std::size_t, std::size_t = 0, typename = std::pmr::polymorphic_allocator<char>>
 class var;
 
 /*namespace sys*/ }
+
+// take ownership of file descriptor (for sys::fio)
+constexpr unsigned int M_ACQUIRE = 0x00010000;
+
 #endif

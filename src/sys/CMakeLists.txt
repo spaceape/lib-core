@@ -8,7 +8,7 @@ include_directories(
 set(SYS_SRC_DIR ${CORE_SRC_DIR}/${NAME})
 
 set(inc
-  ios.h var.h
+  ios.h asio.h var.h
 )
 
 if(SDK)

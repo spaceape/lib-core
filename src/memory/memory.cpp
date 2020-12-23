@@ -194,9 +194,9 @@ bool  heap::has_variable_size() const noexcept
       return true;
 }
 
-std::size_t heap::get_alloc_size(std::size_t) const noexcept
+std::size_t heap::get_alloc_size(std::size_t size) const noexcept
 {
-      return alloc_bytes;
+      return global::get_round_value(size, alloc_bytes);
 }
 
 heap& heap::operator=(const heap& rhs) noexcept
@@ -335,9 +335,9 @@ bool  map::has_variable_size() const noexcept
       return true;
 }
 
-std::size_t map::get_alloc_size(std::size_t) const noexcept
+std::size_t map::get_alloc_size(std::size_t size) const noexcept
 {
-      return alloc_bytes;
+      return global::get_round_value(size, alloc_bytes);
 }
 
 map&  map::operator=(const map& rhs) noexcept

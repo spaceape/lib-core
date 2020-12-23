@@ -1,5 +1,5 @@
-#ifndef sys_sio_h
-#define sys_sio_h
+#ifndef sys_bio_h
+#define sys_bio_h
 /** 
     Copyright (c) 2016-2020, wicked systems
     All rights reserved.
@@ -24,39 +24,54 @@
 #include <sys.h>
 #include <sys/ios.h>
 
-namespace sys {
-
-/* sio
-   static data buffer
+/* bio
+   buffer for buffered io
 */
-class sio: public ios
+class bio: public sys::ios
 {
+  ios*          m_io;
   fragment*     m_resource;
 
   protected:
   char*         m_data_head;
-  char*         m_read_iter;
-  std::int32_t  m_read_size;
-  std::int32_t  m_data_size;
-
-  protected:
-          void   assign(const sio&) noexcept;
-          void   assign(sio&&) noexcept;
+  std::int32_t  m_file_pos;         // actual file pointer, before the last read operation
+  std::int32_t  m_read_pos;         // internal file pointer (buffer base)
+  std::int32_t  m_read_iter;        // current position, relative to m_read_pos
+  std::int32_t  m_read_size;        // size of the read data, relative to m_read_pos
+  std::int32_t  m_save_size;        // size of the data pending write
+  char*         m_data_tail;
+  char          m_eol;
+  unsigned int  m_lock_ctr:8;       // lock the buffer
+  bool          m_enable_bit:1;
+  bool          m_commit_bit:1;     // commit the buffer before discarding
 
   public:
-          sio() noexcept;
-          sio(fragment*) noexcept;
-          sio(const char*, std::size_t = 0) noexcept;
-          sio(fragment*, const char*, std::size_t = 0) noexcept;
-          sio(const sio&) noexcept;
-          sio(sio&&) noexcept;
-  virtual ~sio();
+  static constexpr int undef = -1;
 
+  protected:
+          bool  load(std::size_t, bool) noexcept;
+          void  unload() noexcept;
+
+  public:
+          bio() noexcept;
+          bio(ios*) noexcept;
+          bio(fragment*, ios*) noexcept;
+          bio(const bio&) noexcept;
+          bio(bio&&) noexcept;
+  virtual ~bio();
+
+          void          set_source(ios*) noexcept;
+
+  virtual std::int32_t  seek(std::int32_t, std::int32_t) noexcept override;
+
+          std::int32_t  lock() noexcept;
+  
   virtual int           get_char() noexcept override;
   virtual unsigned int  get_byte() noexcept override;
 
-          std::int32_t  load(const char*, std::size_t = 0) noexcept;
-  virtual std::int32_t  seek(std::int32_t, std::int32_t) noexcept override;
+          std::int32_t  get_line(char*&) noexcept;
+   
+          std::int32_t  read() noexcept;
   virtual std::int32_t  read(std::size_t) noexcept override;
   virtual std::int32_t  read(std::size_t, char*) noexcept override;
 
@@ -64,20 +79,27 @@ class sio: public ios
   virtual std::int32_t  put_byte(unsigned char) noexcept override;
   virtual std::int32_t  write(std::size_t, const char*) noexcept override;
 
+          void          flush() noexcept;
+
+          char*         get_data() noexcept;
   virtual std::int32_t  get_size() noexcept override;
-          std::int32_t  get_capacity() const noexcept;
+          void          unlock() noexcept;
 
   virtual bool  is_seekable() const noexcept override;
   virtual bool  is_readable() const noexcept override;
   virtual bool  is_writable() const noexcept override;
+          bool  is_locked() const noexcept;
 
           bool  reserve(std::size_t) noexcept;
           void  reset(bool = true) noexcept;
           void  release() noexcept;
+
+          std::int32_t  get_capacity() const noexcept;
+
           operator ios*() noexcept;
           operator bool() const noexcept;
-          sio& operator=(const sio&) noexcept;
-          sio& operator=(sio&&) noexcept;
+
+          bio& operator=(const bio&) noexcept;
+          bio& operator=(bio&&) noexcept;
 };
-/*namespace sys*/ }
 #endif

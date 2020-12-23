@@ -25,15 +25,15 @@
 #include <sys/ios.h>
 #include <fcntl.h>
 
-namespace sys {
-
 /* fio
    file wrapper
 */
-class fio: public ios
+class fio: public sys::ios
 {
   int     m_desc;
-  int     m_mode;
+  int     m_mode:24;
+  int     m_own:1;
+  bool    m_seekable:1;
 
   protected:
           void   assign(const fio&) noexcept;
@@ -44,8 +44,8 @@ class fio: public ios
 
   public:
           fio() noexcept;
-          fio(int, int, int) noexcept;
-          fio(const char*, int, int) noexcept;
+          fio(int, int = O_RDWR, int = 0777) noexcept;
+          fio(const char*, int = O_RDWR, int = 0777) noexcept;
           fio(const fio&) noexcept;
           fio(fio&&) noexcept;
   virtual ~fio();
@@ -68,6 +68,10 @@ class fio: public ios
 
   virtual std::int32_t  get_size()  noexcept override;
 
+          bool  set_blocking(bool = true) noexcept;
+          bool  set_nonblocking() noexcept;
+          int   get_fd() const noexcept;
+
   virtual bool  is_seekable() const noexcept override;
   virtual bool  is_readable() const noexcept override;
   virtual bool  is_writable() const noexcept override;
@@ -81,5 +85,4 @@ class fio: public ios
           fio& operator=(const fio&) noexcept;
           fio& operator=(fio&&) noexcept;
 };
-/*namespace sys*/ }
 #endif

@@ -22,8 +22,6 @@
 #include "sio.h"
 #include <cstring>
 
-namespace sys {
-
       sio::sio() noexcept:
       m_resource(fragment::get_default()),
       m_data_head(nullptr),
@@ -137,39 +135,40 @@ std::int32_t sio::load(const char* data, std::size_t size) noexcept
 
 std::int32_t sio::seek(std::int32_t offset, std::int32_t whence) noexcept
 {
-      if(m_data_head) {
-          if(whence == SEEK_SET) {
+      if(whence == SEEK_SET) {
+          if(offset < m_read_size) {
               m_read_iter = m_data_head + offset;
           } else
-          if(whence == SEEK_CUR) {
-              std::int32_t l_position = m_read_iter - m_data_head;
-              if(offset > 0) {
-                  if(l_position > 0) {
-                      if(offset > std::numeric_limits<std::int32_t>::max() - l_position) {
-                          return -1;
-                      }
-                  }
-              } else
-              if(offset < 0) {
-                  if(l_position < 0) {
-                      if(offset < std::numeric_limits<std::int32_t>::min() - l_position) {
-                          return -1;
-                      }
-                  }
-              }
-              m_read_iter = m_read_iter + offset;
-          } else
-          if(whence == SEEK_END) {
-              if(offset > 0) {
-                  if(offset > std::numeric_limits<std::int32_t>::max() - m_read_size) {
+              return -1;
+      } else
+      if(whence == SEEK_CUR) {
+          std::int32_t l_pos = m_read_iter - m_data_head;
+          if(offset > 0) {
+              if(l_pos > 0) {
+                  if(offset > m_read_size - l_pos) {
                       return -1;
                   }
               }
-              m_read_iter = m_read_iter + m_read_size + offset;
+          } else
+          if(offset < 0) {
+              if(l_pos < 0) {
+                  if(offset < 0 - l_pos) {
+                      return -1;
+                  }
+              }
           }
-          return 0;
+          m_read_iter = m_read_iter + offset;
+      } else
+      if(whence == SEEK_END) {
+          if(offset > 0) {
+              return -1;
+          } else
+          if(offset < 0 - (m_read_iter - m_data_head)) {
+              return -1;
+          }
+          m_read_iter = m_read_iter + m_read_size + offset;
       }
-      return -1;
+      return m_read_iter - m_data_head;
 }
 
 std::int32_t sio::read(std::size_t count) noexcept
@@ -182,9 +181,8 @@ std::int32_t sio::read(std::size_t count) noexcept
               l_result = count;
           } else
               l_result = m_read_size - l_offset_0;
-          if(std::int32_t l_advance = seek(l_result, SEEK_CUR); l_advance == 0) {
-              return l_result;
-          }
+          m_read_iter += l_result;
+          return l_result;
       }
       return 0;
 }
@@ -219,8 +217,18 @@ std::int32_t sio::put_byte(unsigned char value) noexcept
       return write(1, reinterpret_cast<char*>(std::addressof(value)));
 }
 
-std::int32_t sio::write(std::size_t, const char*) noexcept
+std::int32_t sio::write(std::size_t size, const char* data) noexcept
 {
+      if(data) {
+          if(size) {
+              std::int32_t l_read_size = m_read_size + size;
+              if(reserve(l_read_size)) {
+                  std::memcpy(m_data_head + m_read_size, data, size);
+                  m_read_size = l_read_size;
+                  return size;
+              }
+          }
+      }
       return 0;
 }
 
@@ -355,5 +363,3 @@ sio&  sio::operator=(sio&& rhs) noexcept
       assign(std::move(rhs));
       return *this;
 }
-
-/*namespace sys*/ }

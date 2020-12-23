@@ -22,11 +22,12 @@
 #include "bio.h"
 #include <cstring>
 
-namespace sys {
-
       constexpr size_t s_lock_max = 255;
       constexpr size_t s_read_min = 64;
       constexpr size_t s_read_max = std::numeric_limits<std::uint32_t>::max() / 4;
+
+      constexpr char   EOL ='\n';
+      constexpr char   EOS = 0;
 
       bio::bio() noexcept:
       bio(fragment::get_default(), nullptr)
@@ -39,25 +40,21 @@ namespace sys {
 }
 
       bio::bio(fragment* resource, ios* io) noexcept:
-      m_io(io),
+      m_io(nullptr),
       m_resource(resource),
       m_data_head(nullptr),
       m_file_pos(-1),
       m_read_pos(-1),
       m_read_iter(0),
       m_read_size(0),
+      m_save_size(0),
       m_data_tail(nullptr),
+      m_eol(EOL),
       m_lock_ctr(0),
       m_enable_bit(true),
       m_commit_bit(false)
 {
-      if(m_io) {
-          if(m_io->is_seekable()) {
-              m_file_pos = m_io->seek(0, SEEK_CUR);
-              m_read_pos = m_file_pos;
-          } else
-              m_file_pos = 0;
-      }
+      set_source(io);
 }
 
       bio::bio(const bio& copy) noexcept:
@@ -65,10 +62,12 @@ namespace sys {
       m_resource(nullptr),
       m_data_head(nullptr),
       m_file_pos(copy.m_file_pos),
-      m_read_pos(-1),
+      m_read_pos(copy.m_read_pos),
       m_read_iter(0),
       m_read_size(0),
+      m_save_size(0),
       m_data_tail(nullptr),
+      m_eol(copy.m_eol),
       m_lock_ctr(0),
       m_enable_bit(true),
       m_commit_bit(false)
@@ -83,7 +82,9 @@ namespace sys {
       m_read_pos(copy.m_read_pos),
       m_read_iter(copy.m_read_iter),
       m_read_size(copy.m_read_size),
+      m_save_size(copy.m_save_size),
       m_data_tail(copy.m_data_tail),
+      m_eol(copy.m_eol),
       m_lock_ctr(copy.m_lock_ctr),
       m_enable_bit(copy.m_enable_bit),
       m_commit_bit(copy.m_commit_bit)
@@ -105,93 +106,141 @@ namespace sys {
    streams;
    <force> will bypass this behaviour for internal use
 */
-std::int32_t bio::load(std::size_t count, bool force) noexcept
+bool  bio::load(std::size_t count, bool force) noexcept
 {
-      if(m_file_pos >= 0) {
+      if(m_read_pos >= 0) {
+          flush();
           if(count < s_read_max) {
-              off_t       l_file_pos  = m_read_pos + m_read_iter;
-              std::size_t l_copy_size = 0;
-              std::size_t l_load_size = 0;
-              bool        l_perform   = force || is_locked() || is_serial();
-              if(m_read_iter >= 0) {
-                  // check if there's a latent seek() and if so, compute the copy and load
-                  // sizes
-                  if(m_read_iter < m_read_size) {
-                      l_copy_size = m_read_size - m_read_iter;
-                      if(l_copy_size < count) {
-                          l_load_size = count - l_copy_size;
-                          if(l_perform) {
-                              if(l_load_size > 0) {
-                                  // // reserve and resize the internal buffer
-                                  // std::size_t  l_data_size = m_data_tail - m_data_head;
-                                  // if(l_data_size < count) {
-                                  //     if(m_lock_ctr == 0) {
-                                  //         reserve(count);
-                                  //     } else
-                                  //         return -1;
-                                  // }
-                                  // compact the internal buffer
-                                  m_read_pos = l_file_pos;
-                                  m_read_size = m_read_size - m_read_iter; 
-                                  std::memmove(m_data_head, m_data_head + m_read_iter, m_read_size);
-                                  m_read_iter = 0;
-                              }
-                          }
-                      } else
-                          l_copy_size = count;
-                  } else
-                      l_load_size = count;
-              } else
-                  l_load_size = count;
+              std::int32_t l_file_pos  = m_read_pos + m_read_iter;
+              std::size_t  l_load_size = count;
+              bool         l_perform   = force || is_locked() || is_serial();
+
+              // detect latent seek() operations and compute load size;
+              // buffer will be later filled with l_load_size bytes from the file
+              // at offset m_read_pos + m_read_size into the buffer, at offset m_read_size
+              if(m_read_iter < m_read_size) {
+                  if(m_read_iter + l_load_size < m_read_size) {
+                      return true;
+                  }
+              //  if(m_lock_ctr == 0) {
+              //      std::int32_t l_sfx_size = m_read_iter + l_load_size - m_read_size;
+              //      std::int32_t l_ovr_size = 0 - m_read_iter - m_read_pos;
+              //      if(l_ovr_size > s_read_min / 2) {
+              //          if(l_ovr_size > l_load_size / 4) {
+              //              std::memmov(m_data_head, m_data_head + m_read_iter, l_ovr_size);
+              //              m_read_pos  = m_read_pos + m_read_iter;
+              //              m_read_size = l_sfx_size;
+              //              l_reset     = false;
+              //          }
+              //      }
+              //  }
+              }
+              // if(m_read_iter < 0) {
+              //     if(is_serial() == false) {
+              //         std::int32_t l_sfx_size = m_read_iter + l_load_size - m_read_size;
+              //         if(l_sfx_size <= 0) {
+              //             std::int32_t l_pfx_size = 0 - m_read_iter;
+              //             std::int32_t l_ovr_size = 0 - m_read_iter - m_read_pos;
+              //             if(l_ovr_size > s_read_min) {
+              //                 if(l_ovr_size > l_load_size / 4) {
+              //                     if(l_pfx_size >= 0) {
+              //                         if(reserve(l_load_size)) {
+              //                             std::memmov(m_data_head + l_pfx_size, m_data_head, l_ovr_size);
+              //                             m_read_pos  = l_file_pos;
+              //                             m_read_size = l_pfx_size;
+              //                             l_reset = false;
+              //                         }
+              //                     }
+              //                 }
+              //             }
+              //         }
+              //     }
+              // }
+              m_read_pos  = l_file_pos;
+              m_read_size = 0;
 
               // load data into the internal buffer
               if(l_load_size > 0) {
-                  // prepare
+                  // make sure there's enough memory to perform the load
                   if(l_perform == true) {
-                      std::size_t  l_data_size = m_data_tail - m_data_head;
-                      if(l_data_size < count) {
-                          if(m_lock_ctr == 0) {
-                              reserve(count);
+                      std::size_t l_data_size = m_data_tail - m_data_head;
+                      std::size_t l_reserve_size = m_read_iter + l_load_size;
+                      if(l_data_size < l_reserve_size) {
+                          if((m_lock_ctr == 0) || (l_data_size == 0)) {
+                              reserve(l_reserve_size);
                           } else
-                              return 0;
+                              return false;
                       }
                   }
-                  // seek
+                  // seek: 
                   if(l_perform == true) {
-                      if(m_file_pos != m_read_pos + m_read_size) {
-                          if(m_io->is_seekable()) {
-                              if(m_io->seek(l_file_pos, SEEK_SET) >= 0) {
-                                  m_file_pos = l_file_pos;
-                              } else
-                                  return 0;
+                      if(m_read_pos != l_file_pos) {
+                          off_t l_seek_pos = m_io->seek(l_file_pos, SEEK_SET);
+                          if(l_seek_pos >= 0) {
+                              m_read_pos = l_seek_pos;
+                              m_file_pos = l_seek_pos;
                           } else
-                              return 0;
+                              return false;
                       }
                   } else
                   if(l_perform == false) {
-                      l_file_pos = m_io->seek(l_file_pos + l_load_size, SEEK_SET);
-                      if(l_file_pos >= 0) {
-                          m_file_pos = l_file_pos;
-                      }
+                      off_t l_seek_pos = m_io->seek(l_file_pos + l_load_size, SEEK_SET);
+                      if(l_seek_pos >= 0) {
+                          m_read_pos = l_seek_pos;
+                          m_file_pos = l_seek_pos;
+                      } else
+                          return false;
                   }
                   // load
                   if(l_perform == true) {
-                      std::size_t l_free_size = m_data_tail - m_data_head - m_read_size;
+                      std::int32_t l_read_size;
+                      std::size_t  l_free_size = m_data_tail - m_data_head - m_read_size;
                       if(l_load_size > l_free_size) {
                           if(s_read_min < l_free_size) {
                               l_load_size = s_read_min;
                           } else
                               l_load_size = l_free_size;
-                      }
-                      l_load_size = m_io->read(l_load_size, m_data_head + m_read_size);
-                      m_file_pos  = m_file_pos + l_load_size;
-                      m_read_size = m_read_size + l_load_size;
+                      } else
+                          l_load_size = l_free_size;
+
+                      if(l_read_size = m_io->read(l_load_size, m_data_head + m_read_size); l_read_size > 0) {
+                          m_file_pos  = m_file_pos + l_read_size;
+                          m_read_size = m_read_size + l_read_size;
+                      } else
+                          return false;
                   }
               }
-              return count;
+              return true;
           }
       }
-      return 0;
+      return false;
+}
+
+/* unload()
+   invalidate read buffer
+*/
+void  bio::unload() noexcept
+{
+      m_read_iter = 0;
+      m_read_size = 0;
+}
+
+void  bio::set_source(ios* io) noexcept
+{
+      if(m_io != io) {
+          unload();
+          flush();
+          m_io = io;
+          if(m_io != nullptr) {
+              m_read_pos = m_io->seek(0, SEEK_CUR);
+              if(m_read_pos < 0) {
+                  m_read_pos = 0;
+              }
+              m_file_pos  = m_read_pos;
+              m_read_iter = 0;
+              m_read_size = 0;
+          }
+      }
 }
 
 /* seek()
@@ -202,52 +251,43 @@ std::int32_t bio::seek(std::int32_t offset, std::int32_t whence) noexcept
 {
       if(whence == SEEK_SET) {
           // seek at an absolute position within the file: if offset points inside our buffer
-          // update m_file_pos and return success
+          // update m_read_pos and return success
           if(offset >= 0) {
-              if(m_file_pos >= 0) {
-                  off_t l_move_pos = offset - m_read_pos;
-                  if(l_move_pos >= 0) {
-                      if(m_lock_ctr > 0) {
-                          if(l_move_pos > 0) {
-                              return -1;
+              if(m_read_pos >= 0) {
+                  off_t l_read_iter = offset - m_read_pos;
+                  if(l_read_iter >= std::numeric_limits<std::int32_t>::min()) {
+                      if(l_read_iter <= std::numeric_limits<std::int32_t>::max()) {
+                          if(l_read_iter != m_read_iter) {
+                              if(m_lock_ctr != 0) {
+                                  return -1;
+                              }
+                              if(m_io->is_seekable()) {
+                                  flush();
+                                  m_read_iter = l_read_iter;
+                              }
                           }
-                      }
-                      if(l_move_pos < m_read_size) {
-                          m_read_iter = l_move_pos;
                           return offset;
-                      }
-                  }
-                  if(m_lock_ctr == 0) {
-                      if(m_io->is_seekable()) {
-                          m_read_iter = l_move_pos;
-                          return  offset;
                       }
                   }
               }
           }
       } else
       if(whence == SEEK_CUR) {
-          // relative seek:
-          // if offset points inside our buffer - update m_file_pos and return success;
-          // if current pos is unknown, retrieving it means seeking as well, so just do an
-          // immediate seek instead, if supported
-          if(m_file_pos >= 0) {
-              off_t l_move_pos = offset + m_read_pos;
-              if(l_move_pos >= 0) {
-                  if(m_lock_ctr > 0) {
-                      if(l_move_pos > 0) {
-                          return -1;
+          if(m_read_pos >= 0) {
+              off_t l_read_iter = m_read_iter + offset;
+              if(l_read_iter >= std::numeric_limits<std::int32_t>::min()) {
+                  if(l_read_iter <= std::numeric_limits<std::int32_t>::max() - m_read_pos ) {
+                      off_t l_file_pos = m_read_pos + l_read_iter;
+                      if(l_read_iter != m_read_iter) {
+                          if(m_lock_ctr != 0) {
+                              return -1;
+                          }
+                          if(m_io->is_seekable()) {
+                              flush();
+                              m_read_iter = l_read_iter;
+                          }
                       }
-                  }
-                  if(l_move_pos < m_read_size) {
-                      m_read_iter = l_move_pos;
-                      return m_read_pos + m_read_iter;
-                  }
-              }
-              if(m_lock_ctr == 0) {
-                  if(m_io->is_seekable()) {
-                      m_read_iter = l_move_pos;
-                      return m_read_pos + m_read_iter;
+                      return l_file_pos;
                   }
               }
           }
@@ -256,13 +296,13 @@ std::int32_t bio::seek(std::int32_t offset, std::int32_t whence) noexcept
           // seek at the end of the file: no way to tell where that is unless the parent
           // stream supports it
           if(m_io->is_seekable()) {
-              off_t l_seek_pos = m_io->seek(offset, SEEK_END);
-              if(l_seek_pos >= 0) {
-                  return  seek(l_seek_pos + offset, SEEK_SET);
+              off_t l_file_pos = m_io->seek(offset, SEEK_END);
+              if(l_file_pos >= 0) {
+                  return seek(l_file_pos + offset, SEEK_SET);
               }
           }
       }
-      return 0;
+      return -1;
 }
 
 /* lock()
@@ -297,6 +337,43 @@ unsigned int bio::get_byte() noexcept
       return static_cast<unsigned int>(EOF);
 }
 
+/* get_line()
+   read from input stream into the memory buffer until reaching eol
+*/
+std::int32_t  bio::get_line(char*& data) noexcept
+{
+      int          l_char;
+      std::int32_t l_count = 0;
+      std::int32_t l_offset = m_read_iter;
+      
+      lock();
+      for(;;) {
+          l_char = get_char();
+          if(l_char != EOF) {
+              if(l_char != m_eol) {
+                  l_count++;
+              } else
+                  break;
+          } else
+              break;
+      }
+      unlock();
+      if(l_count > 0) {
+          m_data_head[m_read_iter - 1] = 0;
+          if(m_data_head[l_offset]) {
+              data = m_data_head + l_offset;
+          } else
+              data = nullptr;
+      } else
+      if(l_count == 0) {
+          data = nullptr;
+          if(l_char == EOF) {
+              return -1;
+          }
+      }
+      return l_count;
+}
+
 /* read()
    find the size of the file and fully read into the internal buffer
 */
@@ -316,7 +393,10 @@ std::int32_t  bio::read() noexcept
 */
 std::int32_t  bio::read(std::size_t count) noexcept
 {
-      return  load(count, false);
+      if(load(count, false)) {
+          return count;
+      }
+      return 0;
 }
 
 /* read()
@@ -326,9 +406,10 @@ std::int32_t  bio::read(std::size_t count) noexcept
 */
 std::int32_t  bio::read(std::size_t count, char* memory) noexcept
 {
-      if(m_file_pos >= 0) {
+      if(m_read_pos >= 0) {
+          flush();
           if(count < s_read_max) {
-              off_t       l_file_pos  = m_read_pos + m_read_iter;
+              off_t       l_file_pos  = m_file_pos + m_read_iter;
               std::size_t l_copy_size = 0;
               std::size_t l_load_size = 0;
               off_t       l_result    = 0;
@@ -346,17 +427,17 @@ std::int32_t  bio::read(std::size_t count, char* memory) noexcept
 
                   // seek and load the necessary data from file
                   if(l_load_size > 0) { 
-                      if(m_file_pos != l_file_pos + static_cast<std::int32_t>(l_copy_size)) {
+                      if(m_read_pos != l_file_pos + static_cast<std::int32_t>(l_copy_size)) {
                           if(m_io->is_seekable()) {
                               if(m_io->seek(l_file_pos, SEEK_SET) >= 0) {
-                                  m_file_pos = l_file_pos;
+                                  m_read_pos = l_file_pos;
                               } else
                                   return 0;
                           } else
                               return 0;
                       }
                       l_load_size  = m_io->read(l_load_size, memory + l_copy_size);
-                      m_file_pos  += l_load_size;
+                      m_read_pos  += l_load_size;
                       l_result    += l_load_size;
                   }
                   // copy the data from the internal buffer
@@ -372,8 +453,8 @@ std::int32_t  bio::read(std::size_t count, char* memory) noexcept
                   if(m_io->is_seekable()) {
                       if(m_read_iter + count > 0) {
                           if(m_read_iter + static_cast<std::int32_t>(count) < m_read_size) {
-                              l_copy_size = m_read_iter - m_read_pos + count;
-                              l_load_size = m_read_pos - m_read_iter;
+                              l_copy_size = m_read_iter - m_file_pos + count;
+                              l_load_size = m_file_pos - m_read_iter;
                           } else
                               l_load_size = count;
                       } else
@@ -383,9 +464,9 @@ std::int32_t  bio::read(std::size_t count, char* memory) noexcept
 
                   // copy the output buffer and update the internal file pointer
                   if(auto l_seek_ret = m_io->seek(l_file_pos, SEEK_SET); l_seek_ret >= 0) {
-                      m_file_pos = l_seek_ret;
+                      m_read_pos = l_seek_ret;
                       if(auto l_load_ret = m_io->read(l_load_size, memory); l_load_ret >= static_cast<std::int32_t>(l_load_size)) {
-                          m_file_pos += l_load_ret;
+                          m_read_pos += l_load_ret;
                           l_result   += l_load_ret;
                           if(l_copy_size > 0) {
                               std::memcpy(memory + l_load_size, m_data_head, l_copy_size);
@@ -405,7 +486,7 @@ std::int32_t  bio::read(std::size_t count, char* memory) noexcept
                       }
                   }
                   if(l_load_size  > 0) {
-                      m_read_pos  = m_file_pos;
+                      m_file_pos  = m_read_pos;
                       m_read_iter = 0;
                       m_read_size = 0;
                   }
@@ -426,9 +507,73 @@ std::int32_t  bio::put_byte(unsigned char value) noexcept
       return write(1, reinterpret_cast<char*>(std::addressof(value)));
 }
 
-std::int32_t  bio::write(std::size_t count, const char* buffer) noexcept
+std::int32_t  bio::write(std::size_t size, const char* data) noexcept
 {
+      if(data) {
+          if(size > 0) {
+              std::size_t  l_used_size;
+              std::int32_t l_result    = size;
+              if(size > (std::size_t)std::numeric_limits<std::int32_t>::max()) {
+                  return 0;
+              }
+
+              // in text mode find an EOL do an early flush if found
+              if(m_eol == EOL) {
+                  if(m_lock_ctr == 0) {
+                      std::int32_t l_last = size - 1;
+                      std::int32_t l_iter = l_last;
+                      while(l_iter >= 0) {
+                          if(data[l_iter] == EOL) {
+                              if(m_save_size > 0) {
+                                  l_used_size = m_save_size + l_iter + 1;
+                                  unload();
+                                  if(reserve(l_used_size)) {
+                                      std::memcpy(m_data_head + m_save_size, data, l_iter + 1);
+                                      m_save_size = l_used_size;
+                                      if(m_io->write(l_used_size, m_data_head)) {
+                                          data += l_iter + 1;
+                                          size -= l_iter + 1;
+                                          m_save_size = 0;
+                                      } else
+                                          return 0;
+                                  } else
+                                      return 0;
+                              } else
+                              if(m_save_size == 0) {
+                                  if(m_io->write(l_iter + 1, data)) {
+                                      data += l_iter + 1;
+                                      size -= l_iter + 1;
+                                  } else
+                                      return 0;
+                              }
+                              break;
+                          }
+                          --l_iter;
+                      }
+                  }
+              }
+
+              // save the unflushed data into the memory buffer, awaiting a flush - manual or otherwise
+              if(size) {
+                  l_used_size = m_save_size + size;
+                  unload();
+                  if(reserve(l_used_size)) {
+                      std::memcpy(m_data_head + m_save_size, data, size);
+                      m_save_size = l_used_size;
+                  }
+              }
+              return l_result;
+          }
+      }
       return 0;
+}
+
+void  bio::flush() noexcept
+{
+      if(m_save_size) {
+          m_io->write(m_save_size, m_data_head);
+          m_save_size = 0;
+      }
 }
 
 char* bio::get_data() noexcept
@@ -498,21 +643,23 @@ bool  bio::reserve(std::size_t size) noexcept
               if(m_read_size == 0) {
                   l_size_next = m_resource->get_alloc_size(size);
               } else
-              if(std::size_t l_size_exp = m_resource->get_alloc_size(size); l_size_exp <= (std::size_t)std::numeric_limits<std::int32_t>::max()) {
-                  auto  l_size_new = l_size_exp;
-                  auto  l_copy_ptr = reinterpret_cast<char*>(m_resource->reallocate(m_data_head, l_size_prev, l_size_exp, alignof(std::size_t)));
-                  if(l_copy_ptr) {
-                      l_data_head = m_data_head;
-                      m_data_head = l_copy_ptr;
-                      m_data_tail = l_copy_ptr + l_size_new;
+              if(m_lock_ctr == 0) {
+                  if(std::size_t l_size_exp = m_resource->get_alloc_size(size); l_size_exp <= (std::size_t)std::numeric_limits<std::int32_t>::max()) {
+                      auto  l_size_new = l_size_exp;
+                      auto  l_copy_ptr = reinterpret_cast<char*>(m_resource->reallocate(m_data_head, l_size_prev, l_size_exp, alignof(std::size_t)));
+                      if(l_copy_ptr) {
+                          l_data_head = m_data_head;
+                          m_data_head = l_copy_ptr;
+                          m_data_tail = l_copy_ptr + l_size_new;
+                      } else
+                          return false;
                   } else
                       return false;
               } else
                   return false;
           } else
           if(m_data_head == nullptr) {
-              // resource is neither static nor resizable - only the first allocation
-              // succeeds
+          // resource is neither static nor resizable - only the first allocation succeeds
               l_size_next = m_resource->get_alloc_size(size);
           } else
               return false;
@@ -527,6 +674,12 @@ bool  bio::reserve(std::size_t size) noexcept
                       m_data_tail = l_copy_ptr + l_size_new;
                       if(m_data_head != l_data_head) {
                           if(l_data_head != nullptr) {
+                              if(m_read_size) {
+                                  std::memcpy(m_data_head, l_data_head, m_read_size);
+                              } else
+                              if(m_save_size) {
+                                  std::memcpy(m_data_head, l_data_head, m_save_size);
+                              }
                               m_resource->deallocate(l_data_head, l_size_prev, alignof(std::size_t));
                           }
                       }
@@ -543,6 +696,7 @@ void  bio::reset(bool clear) noexcept
 {
       if(m_data_head) {
           if(m_commit_bit) {
+              flush();
           }
           m_resource->deallocate(m_data_head, m_data_tail - m_data_head);
       }
@@ -561,9 +715,15 @@ void  bio::release() noexcept
       m_read_iter  = 0;
       m_read_size  = 0;
       m_data_tail  = nullptr;
+      m_eol        = EOL,
       m_lock_ctr   = 0;
       m_enable_bit = true;
       m_commit_bit = false;
+}
+
+std::int32_t bio::get_capacity() const noexcept
+{
+      return m_data_tail - m_data_head;
 }
 
       bio::operator ios*() noexcept
@@ -582,14 +742,16 @@ bio&  bio::operator=(const bio& rhs) noexcept
           reset(false);
           m_io         = rhs.m_io;
           m_data_head  = nullptr;
-          m_file_pos   = rhs.m_file_pos;
-          m_read_pos   =-1;
+          m_file_pos   = rhs.m_read_pos + rhs.m_read_iter;
+          m_read_pos   = 0;
           m_read_iter  = 0;
           m_read_size  = 0;
+          m_save_size  = 0;
           m_data_tail  = nullptr;
+          m_eol        = EOL;
           m_lock_ctr   = 0;
           m_enable_bit = true;
-          m_commit_bit = false;
+          m_commit_bit = rhs.m_commit_bit;
       }
       return *this;
 }
@@ -605,7 +767,9 @@ bio&  bio::operator=(bio&& rhs) noexcept
           m_read_pos   = rhs.m_read_pos;
           m_read_iter  = rhs.m_read_iter;
           m_read_size  = rhs.m_read_size;
+          m_save_size  = rhs.m_save_size;
           m_data_tail  = rhs.m_data_tail;
+          m_eol        = rhs.m_eol;
           m_lock_ctr   = rhs.m_lock_ctr;
           m_enable_bit = rhs.m_enable_bit;
           m_commit_bit = rhs.m_commit_bit;
@@ -613,5 +777,3 @@ bio&  bio::operator=(bio&& rhs) noexcept
       }
       return *this;
 }
-
-/*namespace sys*/ }

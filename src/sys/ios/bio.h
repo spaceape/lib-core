@@ -69,7 +69,8 @@ class bio: public sys::ios
   virtual int           get_char() noexcept override;
   virtual unsigned int  get_byte() noexcept override;
 
-          std::int32_t  get_line(char*&) noexcept;
+          char*         get_line() noexcept;
+          char*         get_line(std::int32_t&) noexcept;
    
           std::int32_t  read() noexcept;
   virtual std::int32_t  read(std::size_t) noexcept override;
